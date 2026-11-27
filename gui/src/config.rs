@@ -801,10 +801,12 @@ pub fn resolve_api_candidates(root: &Path, preferred: &str) -> Vec<String> {
     for u in &trust_urls {
         push(u);
     }
-    let gui = load_gui_settings_file(root);
-    if let Some(saved) = gui.get("api").and_then(|v| v.as_str()) {
-        if !saved.trim().is_empty() && !(has_https_trust && is_legacy_tunnel_url(saved)) {
-            push(saved);
+    if root.join("gui-settings.json").exists() {
+        let gui = load_gui_settings_file(root);
+        if let Some(saved) = gui.get("api").and_then(|v| v.as_str()) {
+            if !saved.trim().is_empty() && !(has_https_trust && is_legacy_tunnel_url(saved)) {
+                push(saved);
+            }
         }
     }
     if out.is_empty() {

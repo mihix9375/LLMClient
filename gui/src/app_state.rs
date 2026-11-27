@@ -120,13 +120,17 @@ impl AppController {
         let mut cli_override = false;
         let mut startup_server_patch = Map::new();
 
-        // Check https-server.json auto promotion when api is still loopback non-HTTPS
+        // Check https-server.json auto promotion when api is still loopback
         if let Ok(text) = fs::read_to_string(root.join("https-server.json")) {
             if let Ok(trust) = serde_json::from_str::<Value>(&text) {
                 if let Some(trust_url) = trust.get("url").and_then(|v| v.as_str()) {
                     let cur_api = gui.get("api").and_then(|v| v.as_str()).unwrap_or("");
                     if let Ok(p) = parse_api_url(cur_api) {
-                        if !p.secure && (p.host == "127.0.0.1" || p.host == "localhost") {
+                        let is_loopback = p.host == "127.0.0.1" || p.host == "localhost";
+                        let trust_is_loopback = parse_api_url(trust_url)
+                            .map(|t| t.host == "127.0.0.1" || t.host == "localhost")
+                            .unwrap_or(true);
+                        if is_loopback && (!p.secure || !trust_is_loopback) {
                             gui["api"] = json!(trust_url);
                         }
                     }
