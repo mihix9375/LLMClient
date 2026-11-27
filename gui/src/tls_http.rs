@@ -113,22 +113,53 @@ pub fn resolve_https_trust_for_url(raw_url: &str) -> Result<Option<HttpsTrust>, 
             push_cand(p.to_path_buf());
         }
     }
+    if let Ok(ca_raw) = std::env::var("QWEN_CA_FILE") {
+        let ca = ca_raw.trim();
+        if !ca.is_empty() {
+            let pin = crate::tls_bootstrap::load_pin_from_ca_file(std::path::Path::new(ca))?;
+            return Ok(Some(HttpsTrust {
+                urls: vec![parsed.full_normalized.clone()],
+                sha256: pin,
+                pins: HashMap::new(),
+            }));
+        }
+    }
+    let host_matches = |u: &str| {
+        parse_api_url(u)
+            .map(|p| p.secure && p.host.eq_ignore_ascii_case(&parsed.host) && p.port == parsed.port)
+            .unwrap_or(false)
+    };
     for dir in candidates {
         if let Some(trust) = load_https_trust(&dir)? {
-            let pin = normalize_sha256_pin(&trust.sha256)?;
-            if trust.urls.is_empty()
-                || trust.urls.iter().any(|u| {
-                    parse_api_url(u)
-                        .map(|p| p.secure && p.host.eq_ignore_ascii_case(&parsed.host) && p.port == parsed.port)
-                        .unwrap_or(false)
-                })
+            for (u, p) in &trust.pins {
+                if host_matches(u) {
+                    let pin = normalize_sha256_pin(p)?;
+                    return Ok(Some(HttpsTrust {
+                        urls: trust.urls,
+                        sha256: pin,
+                        pins: trust.pins,
+                    }));
+                }
+            }
+            if !trust.sha256.is_empty()
+                && (trust.urls.is_empty() || trust.urls.iter().any(|u| host_matches(u)))
             {
+                let pin = normalize_sha256_pin(&trust.sha256)?;
                 return Ok(Some(HttpsTrust {
                     urls: trust.urls,
                     sha256: pin,
+                    pins: trust.pins,
                 }));
             }
         }
+    }
+    if std::env::var("QWEN_NO_AUTO_TRUST").ok().as_deref() != Some("1") {
+        let generated = crate::tls_bootstrap::probe_and_generate_https_trust(
+            &parsed.full_normalized,
+            &config_root_dir(),
+            5000,
+        )?;
+        return Ok(Some(generated));
     }
     Err(format!(
         "HTTPS 証明書ピン (https-server.json) が {} 用に見つかりません",
@@ -136,7 +167,7 @@ pub fn resolve_https_trust_for_url(raw_url: &str) -> Result<Option<HttpsTrust>, 
     ))
 }
 
-fn sha256_upper_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_upper_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     let digest = hasher.finalize();
@@ -254,7 +285,7 @@ fn parse_x509_time(tag: u8, raw: &[u8]) -> Option<i64> {
     Some(dt.and_utc().timestamp())
 }
 
-fn verify_cert_validity_and_san_at(
+pub(crate) fn verify_cert_validity_and_san_at(
     der: &[u8],
     server_name: &ServerName<'_>,
     now: UnixTime,
@@ -1102,5 +1133,50 @@ mod tests {
         ));
         assert!(parse_x509_time(0x17, b"261019193518Z").is_some());
         assert!(parse_x509_time(0x18, b"20510101000000Z").is_some());
+    }
+
+    #[test]
+    fn bootstrap_saves_and_merges_https_server_json_and_reads_pem_ca() {
+        let dir = std::env::temp_dir().join(format!("qwen_boot_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let der_a = b"mock-cert-bytes-server-a";
+        let pin_a = sha256_upper_hex(der_a);
+        let t1 = crate::tls_bootstrap::save_https_trust_entry(
+            &dir,
+            "https://192.0.2.10:8443",
+            &pin_a,
+            Some(der_a),
+        )
+        .unwrap();
+        assert_eq!(t1.sha256, pin_a);
+        assert!(dir.join("https-server.json").is_file());
+        assert!(dir.join("certs").join("server.crt").is_file());
+        let ca_pin = crate::tls_bootstrap::load_pin_from_ca_file(&dir.join("certs").join("server.crt")).unwrap();
+        assert_eq!(ca_pin, pin_a);
+
+        // Same server on second URL (e.g., Tailscale) merges cleanly
+        let t2 = crate::tls_bootstrap::save_https_trust_entry(
+            &dir,
+            "https://198.51.100.10:8443",
+            &pin_a,
+            None,
+        )
+        .unwrap();
+        assert_eq!(t2.urls.len(), 2);
+
+        // Different server preserves previous pin and adds its own per-URL pin
+        let pin_b = sha256_upper_hex(b"mock-cert-bytes-server-b");
+        let _ = crate::tls_bootstrap::save_https_trust_entry(
+            &dir,
+            "https://203.0.113.5:8443",
+            &pin_b,
+            None,
+        )
+        .unwrap();
+        let loaded = load_https_trust(&dir).unwrap().unwrap();
+        assert_eq!(loaded.pins.get("https://192.0.2.10:8443").map(String::as_str), Some(pin_a.as_str()));
+        assert_eq!(loaded.pins.get("https://198.51.100.10:8443").map(String::as_str), Some(pin_a.as_str()));
+        assert_eq!(loaded.pins.get("https://203.0.113.5:8443").map(String::as_str), Some(pin_b.as_str()));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

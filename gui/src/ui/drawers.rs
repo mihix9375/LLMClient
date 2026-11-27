@@ -833,9 +833,13 @@ fn render_settings_pane<'a>(state: &'a UiState, pal: UiPalette) -> Element<'a, M
             text("HTTPS API URL").size(12.0).color(pal.ink_muted),
             text_input("https://localhost:8443", &d.api)
                 .on_input(Message::DraftApi)
+                .on_submit(Message::SaveAndConnect)
                 .size(12.5)
                 .padding([7, 10])
                 .style(theme::input_style(pal)),
+            text("初回接続時に設定 URL から https-server.json を自動生成します")
+                .size(11.0)
+                .color(pal.ink_muted),
             toggle_row("起動時に自動接続", d.auto_connect, Some(Message::DraftAutoConnect), pal),
             row![
                 button(container(text("接続 / 更新").size(12.0).wrapping(Wrapping::None)).center_x(Length::Fill))

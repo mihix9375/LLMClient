@@ -13,6 +13,7 @@ mod live_status;
 mod local_ws;
 mod standby;
 mod text_edit;
+mod tls_bootstrap;
 mod tls_http;
 mod ui;
 mod win_util;

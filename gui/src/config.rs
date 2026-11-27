@@ -1,5 +1,6 @@
 use crate::win_util::{executable_dir, no_links, write_file_atomic};
 use serde_json::{json, Map, Value};
+use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -744,6 +745,7 @@ pub fn parse_cli_args(args: &[String]) -> Result<CliArgs, String> {
 pub struct HttpsTrust {
     pub urls: Vec<String>,
     pub sha256: String,
+    pub pins: HashMap<String, String>,
 }
 
 pub fn load_https_trust(root: &Path) -> Result<Option<HttpsTrust>, String> {
@@ -760,6 +762,7 @@ pub fn load_https_trust(root: &Path) -> Result<Option<HttpsTrust>, String> {
         .unwrap_or("")
         .to_string();
     let mut urls = Vec::new();
+    let mut pins = HashMap::new();
     if let Some(arr) = val.get("urls").and_then(|v| v.as_array()) {
         for item in arr {
             if let Some(s) = item.as_str() {
@@ -772,7 +775,17 @@ pub fn load_https_trust(root: &Path) -> Result<Option<HttpsTrust>, String> {
             urls.push(u.to_string());
         }
     }
-    Ok(Some(HttpsTrust { urls, sha256: sha }))
+    if let Some(obj) = val.get("pins").and_then(|v| v.as_object()) {
+        for (u, p) in obj {
+            if let Some(ps) = p.as_str() {
+                pins.insert(u.clone(), ps.to_string());
+                if !urls.iter().any(|x| x == u) {
+                    urls.push(u.clone());
+                }
+            }
+        }
+    }
+    Ok(Some(HttpsTrust { urls, sha256: sha, pins }))
 }
 
 fn is_legacy_tunnel_url(url: &str) -> bool {
