@@ -1,22 +1,24 @@
 import { createInterface } from 'node:readline';
 import { readFile } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { saveJob } from './client.mjs';
 import { projectRoot } from './config.mjs';
 import { applyCliSettings, buildRunOptions, EFFORT_LEVELS, loadGuiSettings, MODEL_ROLES, presetFromName, SAMPLING_PRESETS, WORK_MODES } from './cli-settings.mjs';
 import { createDesktopBridge, listWindows, resolveTargetWindow } from './cli-desktop.mjs';
 
 const HELP = `依頼を入力すると達成ループを実行します（続きは直前の成果物を引き継ぎ）。
-/new  /clear  /conv [ID]  /resume <ID>   会話・再開制御
-/plan <task>  /goal <task>  /grill-me <topic>  /boost <task>  /teamwork <task>  /browser <task>
+/new  /clear  /history [N|active|done|語句]  /open <ID|#番号>  /conv [ID]  /resume <ID>
+/continue  /retry  /plan <task>  /goal <task>  /grill-me <topic>  /boost <task>  /teamwork <task>  /browser <task>
 /compact [focus]  /learn [list|delete <id>|<note>]  /schedule [list|cancel <id>|<spec> <task>]
 /mode <standard|chat|coding|pc_control>   /role <planner|worker>   /plan [on|off]
-/preset <code|balanced|creative>   /effort <none|low|medium|xhigh>   /budget <N>
+/preset <code|balanced|creative>  /reset-sampling  /effort <none|low|medium|xhigh>  /budget <N>
 /context <N>   /tokens <N>   /temp /top-p /top-k /min-p /repeat-penalty /presence-penalty /frequency-penalty <値>
 /workspace [on|off]  /local-cli [on|off]  /run-on-pc [on|off]  /workdir <dir|clear>  /read-dir <dir|clear>
 /windows [q]  /window <name|hwnd|clear>  /pc [on|off]  /attach <file|clear>
-/perf  /models [status|start|stop|restart|perf]  /tune-apply  /gui-settings  /settings
-/status [ID]  /fetch <ID>  /cancel [ID]  /interrupt <id> <text>  /multi (/end送信)  /exit`;
+/files [path]  /share [list|add <ip>|remove <ip>]  /perf  /models [status|start|stop|restart|perf]
+/autotune [quick|thorough|apply]  /tune-status  /tune-apply  /gui-settings  /settings
+/status [ID] [full]  /fetch <ID>  /cancel [ID]  /interrupt <id> <text>  /multi (/end送信)  /exit`;
 
 const toggle = v => { const s = String(v ?? '').trim().toLowerCase(); if (['on', 'true', '1'].includes(s)) return true; if (['off', 'false', '0'].includes(s)) return false; throw Error('on または off を指定してください'); };
 const TASK_SLASH = new Set(['/plan', '/goal', '/grill-me', '/boost', '/teamwork', '/browser']);
@@ -27,8 +29,9 @@ export async function runInteractive(client, { input = process.stdin, output = p
   const rl = createInterface({ input, output, terminal: !!(input.isTTY && output.isTTY) });
   const lines = rl[Symbol.asyncIterator]();
   const write = v => output.write(String(v) + '\n');
-  let parentJobId, convId, waitingJob, active, exiting = false, multiline = null;
+  let parentJobId, convId, waitingJob, active, exiting = false, multiline = null, lastGoal = '', lastExtra = {};
   const attachments = [];
+  const recentConvs = [];
   const sessionOptions = { ...options };
   let guiState = syncGui ? loadGuiSettings(root) : {};
   const modeLabel = () => (syncGui ? guiState.planMode : sessionOptions.planMode) ? 'Plan (27B計画+8B委譲)' : 'Direct (27B直接)';
@@ -48,6 +51,8 @@ export async function runInteractive(client, { input = process.stdin, output = p
   };
 
   const runTaskText = async (taskText, extraOpts = {}) => {
+    lastGoal = taskText;
+    lastExtra = extraOpts;
     active = new AbortController();
     const usePlan = extraOpts.planMode !== undefined ? extraOpts.planMode : (syncGui ? guiState.planMode : sessionOptions.planMode);
     const modeTag = extraOpts.slashCommand ? `[/${extraOpts.slashCommand} Direct 27B]` : (usePlan ? '[Plan Mode]' : '[Direct 27B]');
@@ -112,9 +117,37 @@ export async function runInteractive(client, { input = process.stdin, output = p
           if (['/exit', '/quit'].includes(cmd)) break;
           if (cmd === '/help') write(HELP);
           else if (cmd === '/new' || cmd === '/clear') { parentJobId = undefined; convId = undefined; waitingJob = undefined; write('新しい会話を開始します。'); }
+          else if (cmd === '/history')
+          {
+            const list = await client.conversations();
+            recentConvs.length = 0;
+            for (const [i, c] of list.slice(-20).reverse().entries()) {
+              recentConvs.push(c.id);
+              write(`${String(i + 1).padStart(2)}) ${c.id.slice(0, 8)} [${c.status || 'ready'}] ${c.title || '(無題)'}`);
+            }
+          }
+          else if (cmd === '/open')
+          {
+            const idx = Number(String(a || '').replace(/^#/, ''));
+            const id = Number.isInteger(idx) && idx >= 1 && idx <= recentConvs.length ? recentConvs[idx - 1] : a;
+            const conv = await client.conversation(id);
+            convId = conv.id;
+            write(JSON.stringify(conv, null, 2));
+          }
+          else if (cmd === '/continue') await runTaskText('つづけて');
+          else if (cmd === '/retry') { if (!lastGoal) throw Error('再送信できる直前の依頼がありません'); await runTaskText(lastGoal, lastExtra); }
           else if (cmd === '/conv') { convId = (!a || a === 'clear') ? undefined : a; write('conversationId=' + (convId || '')); }
+          else if (cmd === '/files') write(JSON.stringify(await client.files(convId, a || undefined), null, 2));
+          else if (cmd === '/share')
+          {
+            const [sub = 'list', ip = '', mode = 'content'] = a.split(/\s+/);
+            if (sub === 'list') write(JSON.stringify(await client.access(convId), null, 2));
+            else if (['remove', 'delete', 'rm'].includes(sub)) write(JSON.stringify(await client.share(convId, ip, mode, { remove: true }), null, 2));
+            else write(JSON.stringify(await client.share(convId, sub === 'add' ? ip : sub, sub === 'add' ? mode : (ip || 'content')), null, 2));
+          }
           else if (cmd === '/gui-settings') write(JSON.stringify(loadGuiSettings(root), null, 2));
           else if (cmd === '/settings') write(JSON.stringify({ ...(syncGui ? { gui: guiState } : {}), server: await client.settings(), session: sessionOptions, previousJobId: parentJobId }, null, 2));
+          else if (cmd === '/reset-sampling') write(JSON.stringify(await patchCfg({ samplingPreset: 'code', ...SAMPLING_PRESETS.code }, SAMPLING_PRESETS.code), null, 2));
           else if (cmd === '/plan' && (!a || isToggleText(a)))
           {
             const next = a ? toggle(a) : !(syncGui ? guiState.planMode : sessionOptions.planMode);
@@ -192,8 +225,24 @@ export async function runInteractive(client, { input = process.stdin, output = p
           else if (cmd === '/attach') { if (!a || a === 'clear') attachments.length = 0; else attachments.push({ name: basename(a), dataBase64: (await readFile(a)).toString('base64') }); write(`添付: ${attachments.length}件`); }
           else if (cmd === '/perf') write(JSON.stringify(await client.perf(), null, 2));
           else if (cmd === '/models') { const fn = { status: () => client.modelsStatus(), start: () => client.modelsStart(), stop: () => client.modelsStop(), restart: () => client.modelsRestart(), perf: () => client.perf() }[a || 'status']; if (!fn) throw Error('/models [status|start|stop|restart|perf]'); write(JSON.stringify(await fn(), null, 2)); }
+          else if (cmd === '/tune-status') write(JSON.stringify(await client.tuneStatus(), null, 2));
           else if (cmd === '/tune-apply') write(JSON.stringify(await client.tuneApply(), null, 2));
-          else if (cmd === '/status') write(JSON.stringify(a || parentJobId ? await client.job(a || parentJobId) : await client.list(), null, 2));
+          else if (cmd === '/autotune')
+          {
+            const toks = a.split(/\s+/).filter(Boolean);
+            const mode = toks.some(t => ['thorough', 'full', 'quality'].includes(t)) ? 'thorough' : 'quick';
+            const workload = toks.includes('chat') ? 'chat' : 'coding';
+            await client.tuneAuto({ task: workload, workload, mode });
+            let st;
+            for (let i = 0; i < 180; i++) { await sleep(1000); st = await client.tuneStatus(); if (['completed', 'failed', 'cancelled'].includes(st.status)) break; }
+            if (toks.includes('apply') && st?.status === 'completed' && !st.alreadyOptimal) st.appliedResult = await client.tuneApply();
+            write(JSON.stringify(st, null, 2));
+          }
+          else if (cmd === '/status')
+          {
+            const [sid, fl] = a.split(/\s+/);
+            write(JSON.stringify(sid && sid !== 'full' ? await client.job(sid, { full: fl === 'full' }) : await client.list(), null, 2));
+          }
           else if (cmd === '/cancel') write(JSON.stringify(await client.cancel(a || client.activeJobId || parentJobId), null, 2));
           else if (cmd === '/interrupt') { const [jid, msg = ''] = a.split(/\s+/, 2); write(JSON.stringify(await client.interrupt(jid, msg), null, 2)); }
           else if (cmd === '/fetch' || cmd === '/resume')

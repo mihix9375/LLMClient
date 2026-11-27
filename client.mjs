@@ -7,12 +7,12 @@ import { HELP_TEXT, runLocalCommand, runRemoteCommand } from './src/cli-commands
 const BOOL_FLAGS = ['help', 'tunnel', 'no-tunnel', 'auto-connect', 'no-connect', 'plan', 'no-plan', 'direct',
   'workspace', 'no-workspace', 'local-cli', 'no-local-cli', 'run-on-pc', 'server-windows', 'pc', 'no-pc',
   'standby', 'no-standby', 'shared-desktop', 'clear-read-dirs', 'local-only', 'no-sync-gui', 'sync-gui',
-  'json', 'apply', 'remove', 'auto-answer'];
+  'json', 'apply', 'remove', 'auto-answer', 'full'];
 const STR_FLAGS = ['url', 'api-url', 'ssh-target', 'work-mode', 'mode', 'role', 'model-role', 'context',
   'tokens', 'max-tokens', 'iterations', 'max-iterations', 'effort', 'reasoning-effort', 'budget',
   'reasoning-budget', 'preset', 'temp', 'temperature', 'top-p', 'top-k', 'min-p', 'repeat-penalty',
   'presence-penalty', 'frequency-penalty', 'workdir', 'window', 'conv', 'parent', 'file', 'options',
-  'output', 'path', 'ip', 'task', 'tune-mode', 'answer', 'question-id'];
+  'output', 'path', 'ip', 'task', 'tune-mode', 'answer', 'question-id', 'filter', 'query'];
 
 const parseOptions = {};
 for (const k of BOOL_FLAGS) parseOptions[k] = k === 'help' ? { type: 'boolean', short: 'h' } : { type: 'boolean' };

@@ -151,7 +151,7 @@ export class QwenClient {
   tuneStatus() { return this.request('/tune/status'); }
   tuneAuto(body = { task: 'coding', mode: 'quick' }) { return this.request('/tune/auto', body, { timeoutMs: 120000 }); }
   tuneApply() { return this.request('/tune/apply', {}, { timeoutMs: 120000 }); }
-  job(id) { return this.request('/jobs/' + this.validId(id)); }
+  job(id, { full = false } = {}) { return this.request('/jobs/' + this.validId(id) + (full ? '?full=1' : '')); }
   cancel(id) { return this.request('/jobs/' + this.validId(id) + '/cancel', {}); }
   validId(id)
   {

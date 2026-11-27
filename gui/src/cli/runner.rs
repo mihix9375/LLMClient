@@ -1,6 +1,6 @@
-use crate::api_cli::{build_job_request, connect_api_with_failover, save_job_outputs};
-use crate::attachments::build_attachment_from_file;
+use crate::api_cli::{build_job_request, connect_api_with_failover, save_job_outputs_with_workspace};
 use crate::cli::args::CliInvocation;
+use crate::cli::attach::load_oneshot_attachments;
 use crate::cli::poll::{poll_job, PollOutcome};
 use crate::cli::stream::StreamPrinter;
 use crate::cli::term::{self, StdinKind};
@@ -38,18 +38,6 @@ pub fn job_exit_code(job: &Value) -> i32 {
         return 2;
     }
     0
-}
-
-pub fn load_attachments(paths: &[String]) -> Result<Vec<Value>, String> {
-    if paths.len() > 5 {
-        return Err("添付は最大5件までです".into());
-    }
-    let mut attached = Vec::with_capacity(paths.len());
-    for p in paths {
-        let att = build_attachment_from_file(Path::new(p))?;
-        attached.push(json!({ "path": att["path"], "base64": att["base64"] }));
-    }
-    Ok(attached)
 }
 
 pub fn submit_and_poll_job<F>(
@@ -112,7 +100,9 @@ fn resolve_oneshot_goal(inv: &CliInvocation) -> Result<String, String> {
         (false, false) => Ok(format!("{}\n\n{}", base.trim(), stdin_part)),
         (false, true) => Ok(base.trim().to_string()),
         (true, false) => Ok(stdin_part),
-        (true, true) if !inv.cli.attach_files.is_empty() => Ok("添付したファイルを確認してください。".into()),
+        (true, true) if !inv.cli.attach_files.is_empty() || inv.cli.attach_clipboard => {
+            Ok("添付したファイルを確認してください。".into())
+        }
         _ => Err("プロンプトを指定してください (-p <text> / --file <path> / stdin)".into()),
     }
 }
@@ -120,7 +110,7 @@ fn resolve_oneshot_goal(inv: &CliInvocation) -> Result<String, String> {
 pub fn run_one_shot(inv: &mut CliInvocation, root: &Path) -> Result<i32, String> {
     let _sig = term::install_sigint_handler();
     let goal = resolve_oneshot_goal(inv)?;
-    let attached = load_attachments(&inv.cli.attach_files)?;
+    let attached = load_oneshot_attachments(&inv.cli.attach_files, inv.cli.attach_clipboard)?;
     let api = connect_api_with_failover(root, &inv.cli.api_url)?;
 
     let json_out = inv.cli.json_out;
@@ -133,7 +123,7 @@ pub fn run_one_shot(inv: &mut CliInvocation, root: &Path) -> Result<i32, String>
     })?;
     let saved_dir = if inv.save_outputs && job.get("status").and_then(|v| v.as_str()) != Some("waiting_user") {
         let out_dir = if inv.cli.output_dir.is_empty() { root.join("downloads") } else { root.join(&inv.cli.output_dir) };
-        Some(save_job_outputs(&job, &out_dir)?.to_string_lossy().into_owned())
+        Some(save_job_outputs_with_workspace(&api, &job, &out_dir)?.to_string_lossy().into_owned())
     } else {
         None
     };

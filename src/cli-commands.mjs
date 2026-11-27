@@ -9,11 +9,11 @@ import { createDesktopBridge, listWindows, resolveTargetWindow, runStandby } fro
 export const HELP_TEXT = `Usage: node client.mjs [command] [args] [options]
 Commands:
   chat (default), help, health, identity, commands, windows, gui-settings, settings, configure, preset,
-  perf, models [status|start|stop|restart|perf], autotune, tune-status, tune-apply, standby,
+  reset-sampling, perf, models [status|start|stop|restart|perf], autotune, tune-status, tune-apply, standby,
   run [goal], status [id], fetch|save <id>, cancel <id>, answer <id> <qid> <text>,
   interrupt <id> <text>, conversations, conversation <id>, compact <convId> [focus],
   memory [list|add <text>|delete <id>], schedules [list|add <spec> <goal>|delete <id>],
-  share <id> <ip>, files <id>, upload <id>, classify <text>
+  share <id> [list|add <ip>|remove <ip>], files <id>, upload <id>, classify <text>
 Options (synced to gui-settings.json by default):
   --url <url> --auto-connect/--no-connect
   --work-mode <standard|chat|coding|pc_control> --role <planner|worker> --plan/--no-plan/--direct
@@ -21,7 +21,7 @@ Options (synced to gui-settings.json by default):
   --preset <code|balanced|creative> --temp --top-p --top-k --min-p --repeat-penalty --presence-penalty --frequency-penalty
   --workspace/--no-workspace --local-cli/--no-local-cli --run-on-pc/--server-windows --workdir <dir|clear>
   --read-dir <dir> --clear-read-dirs --pc/--no-pc --window <title|hwnd> --standby/--no-standby --shared-desktop
-  --attach <file> --conv <id> --parent <id> --file <goal.txt> --output <dir> --local-only --no-sync-gui --json`;
+  --attach <file> --conv <id> --parent <id> --file <goal.txt> --output <dir> --full --filter <all|active|done> --query <text> --local-only --no-sync-gui --json`;
 
 export async function runLocalCommand(command, args, values, { guiPatch, serverPatch }, { root = projectRoot, desktopApi = { listWindows }, out = console } = {})
 {
@@ -45,6 +45,12 @@ export async function runLocalCommand(command, args, values, { guiPatch, serverP
 export async function runRemoteCommand({ client, command, args, values, guiPatch, serverPatch, syncGui, signal, root = projectRoot })
 {
   const out = value => console.log(JSON.stringify(value, null, 2));
+  if (command === 'reset-sampling')
+  {
+    guiPatch.samplingPreset = 'code';
+    for (const [k, v] of Object.entries(SAMPLING_PRESETS.code)) { guiPatch[k] = v; serverPatch[k] = v; }
+    out(await applyCliSettings({ client, guiPatch, serverPatch, syncGui, localOnly: !!values['local-only'], root })); return 0;
+  }
   if (command === 'preset')
   {
     if (!args[0]) throw Error('Usage: preset <code|balanced|creative>');
@@ -75,7 +81,9 @@ export async function runRemoteCommand({ client, command, args, values, guiPatch
   }
   if (command === 'autotune')
   {
-    await client.tuneAuto({ task: values.task || 'coding', mode: values['tune-mode'] || 'quick' });
+    const mode = ['thorough', 'full', 'quality'].includes(values['tune-mode']) ? 'thorough' : 'quick';
+    const workload = values.task === 'chat' ? 'chat' : 'coding';
+    await client.tuneAuto({ task: workload, workload, mode });
     let st;
     for (let i = 0; i < 180; i++)
     {
@@ -122,9 +130,33 @@ export async function runRemoteCommand({ client, command, args, values, guiPatch
     await runStandby({ client, query: values.window || gui.pcWindowTitle, allowLocal: values['local-cli'] ? true : values['no-local-cli'] ? false : gui.localCliEnabled !== false, workdir: gui.localWorkdir || '', readRoots: gui.readOnlyFolders || [], root });
     return 0;
   }
-  if (command === 'conversations') { out(await client.conversations()); return 0; }
+  if (command === 'conversations')
+  {
+    const list = await client.conversations();
+    const f = String(values.filter || '').toLowerCase();
+    const q = String(values.query || '').toLowerCase();
+    const outList = Array.isArray(list) ? list.filter(c => {
+      const run = ['running', 'queued', 'waiting_user'].includes(c.status);
+      if (f === 'active' && !run) return false;
+      if (f === 'done' && run) return false;
+      if (q && !String(c.title || '').toLowerCase().includes(q) && !String(c.id || '').toLowerCase().includes(q)) return false;
+      return true;
+    }) : list;
+    out(outList); return 0;
+  }
   if (command === 'conversation') { out(await client.conversation(args[0])); return 0; }
-  if (command === 'share') { out(await client.share(args[0], values.ip || args[1], values.mode || 'content', { remove: !!values.remove })); return 0; }
+  if (command === 'share')
+  {
+    const sub = args[1] || '';
+    if (!values.ip && (!sub || sub === 'list')) { out(await client.access(args[0])); return 0; }
+    if (['add', 'remove', 'delete', 'rm'].includes(sub))
+    {
+      const ip = values.ip || args[2];
+      const mode = values.mode || args[3] || 'content';
+      out(await client.share(args[0], ip, mode, { remove: sub !== 'add' })); return 0;
+    }
+    out(await client.share(args[0], values.ip || sub, values.mode || args[2] || 'content', { remove: !!values.remove })); return 0;
+  }
   if (command === 'files') { out(await client.files(args[0], values.path || args[1])); return 0; }
   if (command === 'upload')
   {
@@ -133,7 +165,7 @@ export async function runRemoteCommand({ client, command, args, values, guiPatch
     out(await client.upload(args[0], files)); return 0;
   }
   if (command === 'classify') { out(await client.classify(args.join(' '), {}, { signal })); return 0; }
-  if (command === 'status') { out(args[0] ? await client.job(args[0]) : await client.list()); return 0; }
+  if (command === 'status') { out(args[0] ? await client.job(args[0], { full: !!values.full }) : await client.list()); return 0; }
   if (command === 'cancel') { out(await client.cancel(args[0])); return 0; }
   if (command === 'answer') { out(await client.answer(args[0], values['question-id'] || args[1], values.answer || args.slice(2).join(' '))); return 0; }
   if (command === 'interrupt') { out(await client.interrupt(args[0], args.slice(1).join(' '))); return 0; }

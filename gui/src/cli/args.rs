@@ -2,10 +2,11 @@ use crate::cli::term::StdinKind;
 use crate::config::{parse_cli_args, CliArgs};
 
 const SUBCOMMANDS: &[&str] = &[
-    "health", "status", "identity", "commands", "windows", "gui-settings", "settings", "configure",
-    "preset", "perf", "models", "autotune", "tune-status", "tune-apply", "standby", "fetch", "save",
-    "cancel", "answer", "interrupt", "conversations", "conversation", "compact", "memory",
-    "schedules", "share", "files", "upload", "classify", "profiles", "adapters", "adapter-profiles",
+    "health", "connect", "status", "identity", "commands", "windows", "gui-settings", "settings",
+    "configure", "preset", "reset-sampling", "perf", "models", "autotune", "tune-status",
+    "tune-apply", "standby", "fetch", "save", "cancel", "answer", "interrupt", "conversations",
+    "conversation", "compact", "memory", "schedules", "share", "files", "upload", "classify",
+    "profiles", "adapters", "adapter-profiles",
 ];
 
 const VALUE_FLAGS: &[&str] = &[
@@ -13,9 +14,9 @@ const VALUE_FLAGS: &[&str] = &[
     "--model-role", "--context", "--tokens", "--max-tokens", "--iterations", "--max-iterations",
     "--effort", "--reasoning-effort", "--budget", "--reasoning-budget", "--preset", "--temp",
     "--temperature", "--top-p", "--top-k", "--min-p", "--repeat-penalty", "--presence-penalty",
-    "--frequency-penalty", "--workdir", "--read-dir", "--window", "--attach", "--conv",
-    "--conversation", "--parent", "--parent-job", "--file", "--output", "--out", "--path", "--ip",
-    "--task", "--tune-mode", "--answer", "--question-id",
+    "--frequency-penalty", "--workdir", "--read-dir", "--remove-read-dir", "--window", "--attach",
+    "--conv", "--conversation", "--parent", "--parent-job", "--file", "--output", "--out",
+    "--path", "--ip", "--task", "--tune-mode", "--answer", "--question-id", "--filter", "--query",
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -136,7 +137,7 @@ pub fn classify_invocation(
         cli.sync_gui = matches!(
             &mode,
             InvocationMode::Subcommand(c)
-                if matches!(c.as_str(), "configure" | "preset" | "gui-settings" | "tune-apply" | "autotune")
+                if matches!(c.as_str(), "connect" | "configure" | "preset" | "reset-sampling" | "gui-settings" | "tune-apply" | "autotune")
         );
     }
 
@@ -182,5 +183,14 @@ mod tests {
         assert!(!classify_invocation(&s(&["qwen27", "configure", "--effort", "low", "--no-sync-gui"]), StdinKind::Tty, true).unwrap().cli.sync_gui);
         assert!(classify_invocation(&s(&["qwen27", "helth"]), StdinKind::Tty, true).is_err());
         assert!(classify_invocation(&s(&["qwen27", "--unknown-flag"]), StdinKind::Tty, true).is_err());
+
+        let c = classify_invocation(&s(&["qwen27", "connect", "--url", "https://example.invalid:8443"]), StdinKind::Tty, true).unwrap();
+        assert_eq!(c.mode, InvocationMode::Subcommand("connect".into()));
+        assert!(c.cli.sync_gui);
+        let rs = classify_invocation(&s(&["qwen27", "reset-sampling", "--no-sync-gui"]), StdinKind::Tty, true).unwrap();
+        assert_eq!(rs.mode, InvocationMode::Subcommand("reset-sampling".into()));
+        assert!(!rs.cli.sync_gui);
+        let q = classify_invocation(&s(&["qwen27", "conversations", "--filter", "done", "--query=v4"]), StdinKind::Tty, true).unwrap();
+        assert_eq!((q.cli.history_filter.as_str(), q.cli.history_query.as_str()), ("done", "v4"));
     }
 }

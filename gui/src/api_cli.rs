@@ -1,4 +1,6 @@
 use crate::attachments::build_attachment_from_file;
+use crate::cli::format::filter_conversations;
+use crate::cli::slash::parse_schedule_spec;
 use crate::cli::term::ConsoleSession;
 use crate::config::{
     config_root_dir, diag_install, diag_line, find_window_match, infer_preset_index,
@@ -10,6 +12,8 @@ use crate::config::{
 use crate::desktop_worker::DesktopWorkerProcess;
 use crate::tls_http::ApiClient;
 use crate::win_util::{computer_name, desktop_windows, no_links, write_file_atomic};
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine;
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde_json::{json, Value};
 use std::fs;
@@ -122,6 +126,55 @@ pub fn save_job_outputs(job: &Value, downloads_dir: &Path) -> Result<PathBuf, St
     Ok(root)
 }
 
+pub fn save_job_outputs_with_workspace(
+    api: &ApiClient,
+    job: &Value,
+    downloads_dir: &Path,
+) -> Result<PathBuf, String> {
+    let root = save_job_outputs(job, downloads_dir)?;
+    let cid = job
+        .get("conversationId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if valid_id(cid) {
+        if let Ok(list) = api.get(&format!("/conversations/{}/files", cid), 15000) {
+            for f in list.get("files").and_then(|v| v.as_array()).into_iter().flatten() {
+                let name = f.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                let sz = f.get("bytes").and_then(|v| v.as_u64()).unwrap_or(0);
+                if !safe_artifact(name) || sz > 2_097_152 {
+                    continue;
+                }
+                let enc = utf8_percent_encode(name, NON_ALPHANUMERIC).to_string();
+                if let Ok(data) = api.get(&format!("/conversations/{}/files?path={}", cid, enc), 30000) {
+                    if let Some(b64) = data.get("base64").and_then(|v| v.as_str()) {
+                        if let Ok(bytes) = B64.decode(b64) {
+                            let dest = root.join("workspace").join(name);
+                            let _ = write_file_atomic(&dest, &bytes);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(root)
+}
+
+pub(crate) fn normalize_tune_mode(raw: &str) -> &'static str {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "thorough" | "full" | "quality" => "thorough",
+        _ => "quick",
+    }
+}
+
+pub(crate) fn sync_sampling_to_gui(root: &Path, settings_obj: &Value) {
+    let mut s = SamplingValues::default();
+    sampling_from_json(settings_obj, &mut s);
+    let mut patch = json!({});
+    sampling_to_json(&s, &mut patch);
+    patch["samplingPreset"] = json!(preset_name_from_index(infer_preset_index(&s)));
+    let _ = save_gui_settings_file(root, &patch);
+}
+
 pub fn resolve_api_url(root: &Path, explicit_url: &str) -> String {
     if !explicit_url.trim().is_empty() {
         return explicit_url.trim().trim_end_matches('/').to_string();
@@ -167,13 +220,13 @@ fn cli_help_json() -> Value {
     json!({
         "usage": "Qwen27.exe --api <command> [args] [options]",
         "commands": [
-            "health", "identity", "commands", "windows", "gui-settings", "settings", "configure",
-            "preset", "perf", "models [status|start|stop|restart|perf]", "autotune", "tune-status",
-            "tune-apply", "standby", "run", "status", "fetch", "save", "cancel", "answer",
-            "interrupt", "conversations", "conversation", "compact", "memory", "schedules",
-            "share", "files", "upload", "classify", "profiles", "adapters", "adapter-profiles"
+            "health", "connect", "identity", "commands", "windows", "gui-settings", "settings",
+            "configure", "preset", "reset-sampling", "perf", "models [status|start|stop|restart|perf]",
+            "autotune", "tune-status", "tune-apply", "standby", "run", "status", "fetch", "save",
+            "cancel", "answer", "interrupt", "conversations", "conversation", "compact", "memory",
+            "schedules", "share", "files", "upload", "classify", "profiles", "adapters", "adapter-profiles"
         ],
-        "options": "--url, --auto-connect/--no-connect, --work-mode (standard|chat|coding|pc_control), --role (planner|worker), --plan/--no-plan, --context, --tokens, --effort (none|low|medium|xhigh), --budget, --preset (code|balanced|creative), --temp, --top-p, --top-k, --min-p, --repeat-penalty, --presence-penalty, --frequency-penalty, --workspace/--no-workspace, --local-cli/--no-local-cli, --run-on-pc/--server-windows, --workdir, --read-dir, --clear-read-dirs, --window, --pc/--no-pc, --standby/--no-standby, --shared-desktop, --attach, --conv, --parent, --file, --output, --local-only, --no-sync-gui",
+        "options": "--url, --auto-connect/--no-connect, --work-mode (standard|chat|coding|pc_control), --role (planner|worker), --plan/--no-plan, --context, --tokens, --effort (none|low|medium|xhigh), --budget, --preset (code|balanced|creative), --temp, --top-p, --top-k, --min-p, --repeat-penalty, --presence-penalty, --frequency-penalty, --workspace/--no-workspace, --local-cli/--no-local-cli, --run-on-pc/--server-windows, --workdir, --read-dir, --remove-read-dir, --clear-read-dirs, --window, --pc/--no-pc, --standby/--no-standby, --shared-desktop, --attach, --attach-clipboard, --conv, --parent, --file, --output, --full, --filter, --query, --dark-theme/--light-theme, --local-only, --no-sync-gui",
     })
 }
 
@@ -515,10 +568,19 @@ fn run_cli_standby(
 }
 
 fn sync_read_dirs_into_gui_patch(args: &mut CliArgs, current_gui: &Value) -> Result<(), String> {
-    if !args.clear_read_dirs && args.read_dirs.is_empty() {
+    if !args.clear_read_dirs && args.read_dirs.is_empty() && args.remove_read_dirs.is_empty() {
         return Ok(());
     }
-    let roots = resolve_cli_read_roots(current_gui, &args.read_dirs, args.clear_read_dirs)?;
+    let mut roots = resolve_cli_read_roots(current_gui, &args.read_dirs, args.clear_read_dirs)?;
+    for rem in &args.remove_read_dirs {
+        let canon_rem = fs::canonicalize(rem).ok().map(strip_unc_prefix);
+        roots.retain(|p| {
+            let p_str = p.to_string_lossy();
+            let same_raw = p_str.eq_ignore_ascii_case(rem.trim());
+            let same_canon = canon_rem.as_ref().is_some_and(|c| c == p);
+            !same_raw && !same_canon
+        });
+    }
     let arr: Vec<Value> = roots
         .into_iter()
         .map(|p| Value::String(p.to_string_lossy().into_owned()))
@@ -916,6 +978,26 @@ fn run_cli_subcommand(args: &mut CliArgs, root: &Path) -> Result<i32, String> {
         emit(&json!({ "type": "result", "value": res["gui"] }));
         return Ok(0);
     }
+    if args.command == "connect" {
+        let raw_url = if !args.api_url.is_empty() {
+            args.api_url.clone()
+        } else if let Some(first) = args.positionals.first() {
+            first.clone()
+        } else {
+            String::new()
+        };
+        let api = connect_api_with_failover(root, &raw_url)?;
+        let health = api.get("/health", 15000)?;
+        if health.get("service").and_then(|v| v.as_str()) != Some("qwen27-framework") {
+            return Err("接続先が Qwen27 Framework API ではありません".into());
+        }
+        let resolved_url = api.base_url().to_string();
+        if args.sync_gui {
+            let _ = save_gui_settings_file(root, &json!({ "api": resolved_url }));
+        }
+        emit(&json!({ "type": "result", "value": { "url": resolved_url, "health": health } }));
+        return Ok(0);
+    }
 
     let api = connect_api_with_failover(root, &args.api_url)?;
     let empty = json!({});
@@ -937,6 +1019,20 @@ fn run_cli_subcommand(args: &mut CliArgs, root: &Path) -> Result<i32, String> {
             emit(&json!({ "type": "result", "value": res }));
             return Ok(0);
         }
+        "reset-sampling" => {
+            let s = SamplingValues::default();
+            let mut sp = Value::Object(std::mem::take(&mut args.server_patch));
+            sampling_to_json(&s, &mut sp);
+            let mut gp = Value::Object(std::mem::take(&mut args.gui_patch));
+            sampling_to_json(&s, &mut gp);
+            gp["samplingPreset"] = json!("code");
+            args.server_patch = sp.as_object().cloned().unwrap_or_default();
+            args.gui_patch = gp.as_object().cloned().unwrap_or_default();
+            let client = if args.local_only { None } else { Some(&api) };
+            let res = apply_settings_and_gui(client, root, args)?;
+            emit(&json!({ "type": "result", "value": res }));
+            return Ok(0);
+        }
         "health" => { emit(&json!({ "type": "result", "value": api.get("/health", 15000)? })); return Ok(0); }
         "commands" => { emit(&json!({ "type": "result", "value": api.get("/commands", 15000)? })); return Ok(0); }
         "identity" => { emit(&json!({ "type": "result", "value": api.get("/identity", 15000)? })); return Ok(0); }
@@ -949,21 +1045,18 @@ fn run_cli_subcommand(args: &mut CliArgs, root: &Path) -> Result<i32, String> {
             let res = api.post("/tune/apply", &empty, 120_000)?;
             if args.sync_gui {
                 if let Some(s_obj) = res.get("settings").filter(|v| v.is_object()) {
-                    let mut s = SamplingValues::default();
-                    sampling_from_json(s_obj, &mut s);
-                    let mut patch = json!({});
-                    sampling_to_json(&s, &mut patch);
-                    patch["samplingPreset"] = json!(preset_name_from_index(infer_preset_index(&s)));
-                    let _ = save_gui_settings_file(root, &patch);
+                    sync_sampling_to_gui(root, s_obj);
                 }
             }
             emit(&json!({ "type": "result", "value": res }));
             return Ok(0);
         }
         "autotune" => {
+            let mode = normalize_tune_mode(&args.tune_mode);
+            let workload = if args.task == "chat" { "chat" } else { "coding" };
             let started = api.post(
                 "/tune/auto",
-                &json!({ "task": args.task, "mode": args.tune_mode }),
+                &json!({ "task": workload, "workload": workload, "mode": mode }),
                 15000,
             )?;
             emit(&json!({ "type": "progress", "stage": "started", "value": started }));
@@ -989,12 +1082,7 @@ fn run_cli_subcommand(args: &mut CliArgs, root: &Path) -> Result<i32, String> {
                 let applied = api.post("/tune/apply", &empty, 120_000)?;
                 if args.sync_gui {
                     if let Some(s_obj) = applied.get("settings").filter(|v| v.is_object()) {
-                        let mut s = SamplingValues::default();
-                        sampling_from_json(s_obj, &mut s);
-                        let mut patch = json!({});
-                        sampling_to_json(&s, &mut patch);
-                        patch["samplingPreset"] = json!(preset_name_from_index(infer_preset_index(&s)));
-                        let _ = save_gui_settings_file(root, &patch);
+                        sync_sampling_to_gui(root, s_obj);
                     }
                 }
                 status["appliedResult"] = applied;
@@ -1044,11 +1132,8 @@ fn run_cli_subcommand(args: &mut CliArgs, root: &Path) -> Result<i32, String> {
             match sub {
                 "list" => emit(&json!({ "type": "result", "value": api.get("/schedules", 15000)? })),
                 "add" => {
-                    if args.positionals.len() < 3 {
-                        return Err("Usage: schedules add \"<in 10m|every 1h>\" <goal>".into());
-                    }
-                    let spec = &args.positionals[1];
-                    let goal = args.positionals[2..].join(" ");
+                    let raw_spec = args.positionals[1..].join(" ");
+                    let (spec, goal) = parse_schedule_spec(&raw_spec)?;
                     let mut body = json!({ "spec": spec, "goal": goal });
                     if !args.conv_id.is_empty() {
                         body["conversationId"] = json!(args.conv_id);
@@ -1064,25 +1149,39 @@ fn run_cli_subcommand(args: &mut CliArgs, root: &Path) -> Result<i32, String> {
             return Ok(0);
         }
         "standby" => return run_standby_for_args(&api, args, root),
-        "conversations" => { emit(&json!({ "type": "result", "value": api.get("/conversations", 15000)? })); return Ok(0); }
+        "conversations" => {
+            let list = api.get("/conversations", 15000)?;
+            let out = if args.history_filter.is_empty() && args.history_query.is_empty() {
+                list
+            } else if let Some(arr) = list.as_array() {
+                Value::Array(filter_conversations(arr, &args.history_filter, &args.history_query))
+            } else {
+                list
+            };
+            emit(&json!({ "type": "result", "value": out }));
+            return Ok(0);
+        }
         "conversation" => { emit(&json!({ "type": "result", "value": api.get(&format!("/conversations/{}", need_id(0)?), 15000)? })); return Ok(0); }
         "share" => {
             let cid = need_id(0)?;
-            let ip = if !args.ip.is_empty() {
-                args.ip.clone()
-            } else if args.positionals.len() > 1 {
-                args.positionals[1].clone()
+            let sub = args.positionals.get(1).map(|s| s.as_str()).unwrap_or("");
+            if args.ip.is_empty() && (sub.is_empty() || sub == "list") {
+                let res = api.get(&format!("/conversations/{}/access", cid), 15000)
+                    .or_else(|_| api.get(&format!("/conversations/{}", cid), 15000))?;
+                emit(&json!({ "type": "result", "value": res }));
+                return Ok(0);
+            }
+            let (ip, mode, remove) = if matches!(sub, "add" | "remove" | "delete" | "rm") {
+                let rem = sub != "add";
+                let target_ip = if !args.ip.is_empty() { args.ip.clone() } else { args.positionals.get(2).cloned().ok_or("共有対象の IP を指定してください")? };
+                let target_mode = if !args.mode_arg.is_empty() { args.mode_arg.clone() } else { args.positionals.get(3).cloned().unwrap_or_else(|| "content".into()) };
+                (target_ip, target_mode, rem)
             } else {
-                return Err("Provide <conversationId> <ip>".into());
+                let target_ip = if !args.ip.is_empty() { args.ip.clone() } else if !sub.is_empty() { sub.to_string() } else { return Err("Provide <conversationId> <ip>".into()); };
+                let target_mode = if !args.mode_arg.is_empty() { args.mode_arg.clone() } else { args.positionals.get(2).cloned().unwrap_or_else(|| "content".into()) };
+                (target_ip, target_mode, args.remove)
             };
-            let mode = if !args.mode_arg.is_empty() {
-                args.mode_arg.clone()
-            } else if args.positionals.len() > 2 {
-                args.positionals[2].clone()
-            } else {
-                "content".into()
-            };
-            let body = json!({ "ip": ip, "mode": mode, "remove": args.remove });
+            let body = json!({ "ip": ip, "mode": mode, "remove": remove });
             emit(&json!({ "type": "result", "value": api.post(&format!("/conversations/{}/access", cid), &body, 15000)? }));
             return Ok(0);
         }
@@ -1101,7 +1200,16 @@ fn run_cli_subcommand(args: &mut CliArgs, root: &Path) -> Result<i32, String> {
             } else {
                 format!("/conversations/{}/files?path={}", cid, enc)
             };
-            emit(&json!({ "type": "result", "value": api.get(&path, 15000)? }));
+            let mut val = api.get(&path, 15000)?;
+            if !q.is_empty() && !args.output_dir.is_empty() {
+                if let Some(b64) = val.get("base64").and_then(|v| v.as_str()) {
+                    let bytes = B64.decode(b64).map_err(|e| format!("base64 decode error: {}", e))?;
+                    let dest = PathBuf::from(&args.output_dir);
+                    write_file_atomic(&dest, &bytes)?;
+                    val["savedPath"] = json!(dest.to_string_lossy());
+                }
+            }
+            emit(&json!({ "type": "result", "value": val }));
             return Ok(0);
         }
         "upload" => {
@@ -1122,7 +1230,8 @@ fn run_cli_subcommand(args: &mut CliArgs, root: &Path) -> Result<i32, String> {
             if args.positionals.is_empty() {
                 emit(&json!({ "type": "result", "value": api.get("/jobs", 15000)? }));
             } else {
-                emit(&json!({ "type": "result", "value": api.get(&format!("/jobs/{}", need_id(0)?), 15000)? }));
+                let q = if args.full_job { "?full=1" } else { "" };
+                emit(&json!({ "type": "result", "value": api.get(&format!("/jobs/{}{}", need_id(0)?, q), 15000)? }));
             }
             return Ok(0);
         }
@@ -1133,7 +1242,7 @@ fn run_cli_subcommand(args: &mut CliArgs, root: &Path) -> Result<i32, String> {
             } else {
                 root.join(&args.output_dir)
             };
-            let saved = save_job_outputs(&job, &out_dir)?;
+            let saved = save_job_outputs_with_workspace(&api, &job, &out_dir)?;
             emit(&json!({ "type": "result", "job": job, "savedDir": saved.to_string_lossy() }));
             return Ok(0);
         }
@@ -1253,7 +1362,7 @@ fn run_cli_subcommand(args: &mut CliArgs, root: &Path) -> Result<i32, String> {
                     } else {
                         root.join(&args.output_dir)
                     };
-                    let saved = save_job_outputs(&job, &out_dir)?;
+                    let saved = save_job_outputs_with_workspace(&api, &job, &out_dir)?;
                     emit(&json!({ "type": "result", "job": job, "savedDir": saved.to_string_lossy() }));
                     return Ok(if status == "completed" { 0 } else { 2 });
                 }
@@ -1335,18 +1444,14 @@ pub(crate) fn build_job_request(
     let work_mode = gui.get("workMode").and_then(|v| v.as_str()).unwrap_or("standard");
     let model_role = gui.get("modelRole").and_then(|v| v.as_str()).unwrap_or("planner");
     let plan_mode = gui.get("planMode").and_then(|v| v.as_bool()).unwrap_or(false);
-    let mut use_ws = gui.get("workspaceEnabled").and_then(|v| v.as_bool()).unwrap_or(true);
-    if !ws_capable
-        && work_mode != "pc_control"
-        && attached.is_empty()
-        && !args.gui_patch.contains_key("workspaceEnabled")
-    {
-        use_ws = false;
+    let use_ws = gui.get("workspaceEnabled").and_then(|v| v.as_bool()).unwrap_or(true);
+    let mut want_ws = (use_ws && work_mode != "chat")
+        || ((!attached.is_empty() || slash_cmd.is_some()) && ws_capable)
+        || (work_mode == "pc_control");
+    if !ws_capable && !args.gui_patch.contains_key("workspaceEnabled") && work_mode != "pc_control" && attached.is_empty() {
+        want_ws = false;
     }
-    if work_mode == "pc_control" || !attached.is_empty() || (slash_cmd.is_some() && ws_capable) {
-        use_ws = true;
-    }
-    if use_ws && !ws_capable {
+    if want_ws && !ws_capable {
         return Err("作業環境対応のAPIに接続し直してください".into());
     }
 
@@ -1426,12 +1531,13 @@ pub(crate) fn build_job_request(
         }
     }
 
-    if use_ws {
+    if want_ws {
         options["execution"] = json!("workspace");
     }
+    let open_desktop = desktop_allowed && work_mode != "chat";
     let mut machine = String::new();
-    if server_win_avail && use_ws {
-        machine = if run_on_pc || desktop_allowed || args.shared_desktop {
+    if server_win_avail && want_ws {
+        machine = if run_on_pc || open_desktop || args.shared_desktop {
             "user-pc"
         } else {
             "server-windows"
@@ -1443,7 +1549,7 @@ pub(crate) fn build_job_request(
     }
     let use_local = (work_mode != "pc_control")
         && (work_mode != "chat")
-        && use_ws
+        && want_ws
         && local_allowed
         && machine != "server-windows";
     if use_local && !local_capable {
@@ -1461,8 +1567,8 @@ pub(crate) fn build_job_request(
     let mut bridge = CliDesktopBridge::new();
     let mut target_hwnd = 0isize;
     let mut target_title = String::new();
-    if !args.shared_desktop && (desktop_allowed || use_local) {
-        if desktop_allowed {
+    if !args.shared_desktop && (open_desktop || use_local) {
+        if open_desktop {
             let query = if args.window_query.is_empty() {
                 gui.get("pcWindowTitle").and_then(|v| v.as_str()).unwrap_or("").to_string()
             } else {
@@ -1483,7 +1589,7 @@ pub(crate) fn build_job_request(
         options["desktopSession"] = json!(bridge.open_session(
             api.base_url(),
             &target_title,
-            desktop_allowed,
+            open_desktop,
             use_local,
         )?);
     }
@@ -1517,7 +1623,7 @@ pub(crate) fn build_job_request(
             target_hwnd,
             ws,
             resolve_cli_read_roots(gui, &args.read_dirs, args.clear_read_dirs)?,
-            desktop_allowed,
+            open_desktop,
             use_local,
         )?;
     }

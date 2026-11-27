@@ -138,8 +138,8 @@ function Convert-QwenCliArgs([string[]]$raw)
 {
     $translated = [System.Collections.Generic.List[string]]::new()
     $cmd = $null
-    $known = @('chat','help','health','identity','windows','gui-settings','settings','configure','preset','perf','models','autotune','tune-status','tune-apply','standby','run','status','fetch','save','cancel','answer','interrupt','conversations','conversation','share','files','upload','classify','profiles','adapters','adapter-profiles')
-    $valFlags = @('--url','--api-url','--ssh-target','--work-mode','--mode','--role','--model-role','--context','--tokens','--max-tokens','--iterations','--max-iterations','--effort','--reasoning-effort','--budget','--reasoning-budget','--preset','--temp','--temperature','--top-p','--top-k','--min-p','--repeat-penalty','--presence-penalty','--frequency-penalty','--workdir','--read-dir','--window','--attach','--conv','--parent','--file','--output','--path','--ip','--task','--tune-mode','--answer','--question-id')
+    $known = @('chat','help','health','connect','identity','commands','windows','gui-settings','settings','configure','preset','reset-sampling','perf','models','autotune','tune-status','tune-apply','standby','run','status','fetch','save','cancel','answer','interrupt','conversations','conversation','compact','memory','schedules','share','files','upload','classify','profiles','adapters','adapter-profiles')
+    $valFlags = @('--url','--api-url','--ssh-target','--work-mode','--mode','--role','--model-role','--context','--tokens','--max-tokens','--iterations','--max-iterations','--effort','--reasoning-effort','--budget','--reasoning-budget','--preset','--temp','--temperature','--top-p','--top-k','--min-p','--repeat-penalty','--presence-penalty','--frequency-penalty','--workdir','--read-dir','--remove-read-dir','--window','--attach','--conv','--parent','--file','--output','--path','--ip','--task','--tune-mode','--answer','--question-id','--filter','--query')
     for ($i = 0; $i -lt $raw.Count; $i++)
     {
         $a = $raw[$i]
@@ -165,8 +165,14 @@ try
     $rest = $parsed.Args
     if ($cmd -eq 'chat')
     {
-        . (Join-Path $PSScriptRoot 'scripts\qwen-chat.ps1')
-        exit (Start-QwenChat $rest)
+        $chatScript = Join-Path $PSScriptRoot 'scripts\qwen-chat.ps1'
+        if (Test-Path -LiteralPath $chatScript)
+        {
+            . $chatScript
+            exit (Start-QwenChat $rest)
+        }
+        & $script:ApiHelper (@('--cli') + $rest)
+        exit $LASTEXITCODE
     }
     if ($cmd -eq 'standby')
     {

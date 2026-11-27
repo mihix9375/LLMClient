@@ -50,53 +50,62 @@ $env:QWEN_MSVC_BASE = 'D:\VS2022\VC\Tools\MSVC'
 
 ## 使い方（CLI）
 
-CLI は 3 通りあります。どれも同じサーバーの API を使います。
+CLI は統合 CLI（`Qwen27.exe`）・互換 NDJSON（`Qwen27.exe --api`）・Node.js 版の 3 通りがあり、GUI で行える操作（接続・会話履歴の検索/閲覧・継続/再送・添付/クリップボード貼付・共有・ワークスペース閲覧/保存・PC連携待機/緊急停止・自動最適化・テーマ設定など）をすべて CLI からも実行できます。
 
 | CLI | 起動 | 向いている使い方 |
 |---|---|---|
-| Node.js 版 | `node client.mjs <コマンド>` | Node.js がある環境。対話のチャットもこれ |
-| `Qwen27.exe` の CLI | `Qwen27.exe --api <コマンド>` | Node.js なしで使う。結果は JSON で出る（台本から使いやすい） |
-| PowerShell のラッパー | `qwen.cmd <コマンド>` / `qwen.ps1` | Windows で `Qwen27.exe` を人が使う時（質問に番号で答えられる） |
+| 統合 CLI（`Qwen27.exe`） | `Qwen27.exe --cli` / `-p "..."` / `<コマンド>` | 対話 REPL・パイプ・単発コマンドを `Qwen27.exe` 単体で使う時 |
+| 互換 NDJSON CLI | `Qwen27.exe --api <コマンド>` | JSON / NDJSON で自動化スクリプトから呼ぶ時 |
+| PowerShell のラッパー | `qwen.cmd <コマンド>` / `qwen.ps1` | Windows で `Qwen27.exe` を人が対話・実行する時 |
+| Node.js 版 | `node client.mjs <コマンド>` | Node.js がある環境 |
 
 ### よく使うコマンド
 
-```bash
-node client.mjs                        # 対話のチャット（コマンドを省くとこれ）
-node client.mjs health                 # サーバーの状態
-node client.mjs run "やりたいこと"     # ジョブを作る（--file goal.txt で文を読み込み）
-node client.mjs status <ジョブID>      # 進み具合
-node client.mjs answer <ジョブID> <質問ID> "答え"   # ジョブからの質問に答える
-node client.mjs fetch <ジョブID>       # 結果を取る（save で --output のフォルダーへ保存）
-node client.mjs cancel <ジョブID>
+```powershell
+Qwen27.exe --cli                                 # 統合 対話 CLI (未接続でも起動し /connect で接続可)
+Qwen27.exe connect --url https://<server>:8443   # 初回接続と https-server.json 自動生成
+Qwen27.exe -p "やりたいこと"                     # 非対話ワンショット実行（stdout へ出力）
+Qwen27.exe health                                # サーバーの状態
+Qwen27.exe conversations --filter done           # 会話履歴一覧・絞り込み
+Qwen27.exe conversation <会話ID>                 # 会話の詳細表示
+Qwen27.exe fetch <ジョブID> --output .\dl        # 成果物＋ワークスペース一括保存
 ```
 
 ### コマンドの一覧
 
 | 分類 | コマンド |
 |---|---|
-| 接続・情報 | `help`・`health`・`identity`・`commands`・`windows` |
-| ジョブ | `run [目的]`・`status [ID]`・`fetch <ID>`・`save <ID>`・`cancel <ID>`・`answer <ID> <質問ID> <文>`・`interrupt <ID> <文>`・`files <ID>`・`upload <ID>`・`share <ID> <IP>` |
-| 会話 | `chat`（既定）・`conversations`・`conversation <ID>`・`compact <会話ID> [焦点]` |
+| 接続・情報 | `help`・`version`・`connect [URL]`・`health`・`identity`・`commands`・`windows`・`profiles`・`adapters`・`adapter-profiles` |
+| ジョブ | `run [目的]`・`-p <目的>`・`status [ID] [--full]`・`fetch <ID>`・`save <ID>`・`cancel <ID>`・`answer <ID> <質問ID> <文>`・`interrupt <ID> <文>` |
+| 会話 | `chat` / `--cli`・`conversations [--filter active|done] [--query 語]`・`conversation <ID>`・`compact <会話ID> [焦点]` |
 | 覚え書き・予定 | `memory [list\|add <文>\|delete <ID>]`・`schedules [list\|add <指定> <目的>\|delete <ID>]` |
+| ファイル・共有 | `files <会話ID> [path]`・`upload <会話ID> <file...>`・`share <会話ID> [list\|add <IP>\|remove <IP>]` |
 | モデル・調整 | `models [status\|start\|stop\|restart\|perf]`・`perf`・`autotune`・`tune-status`・`tune-apply`・`standby` |
-| 設定 | `settings`・`configure`・`preset <code\|balanced\|creative>`・`gui-settings` |
-| そのほか | `classify <文>` |
+| 設定・分類 | `settings`・`configure`・`preset <code\|balanced\|creative>`・`reset-sampling`・`gui-settings`・`classify <文>` |
 
 ### 主なオプション
 
-オプションは既定で `gui-settings.json` に保存され、GUI と共有されます（その回だけにするなら `--no-sync-gui`）。
+オプションは既定で `gui-settings.json` に保存され、GUI と共有されます（対話 REPL / ワンショットは既定でその回限り、`--sync-gui` で保存）。
 
 | 分類 | オプション |
 |---|---|
-| 接続 | `--url <URL>`・`--auto-connect` / `--no-connect` |
+| 接続・出力 | `--url <URL>`・`--auto-connect` / `--no-connect`・`--json`・`--stream` / `--no-stream`・`-q` / `--quiet`・`--no-color` |
 | 動き方 | `--work-mode <standard\|chat\|coding\|pc_control>`・`--role <planner\|worker>`・`--plan` / `--no-plan` / `--direct` |
 | 量 | `--context <N>`・`--tokens <N>`・`--effort <none\|low\|medium\|xhigh>`・`--budget <N>` |
 | サンプリング | `--preset <code\|balanced\|creative>`・`--temp`・`--top-p`・`--top-k`・`--min-p`・`--repeat-penalty`・`--presence-penalty`・`--frequency-penalty` |
-| 作業の場所 | `--workspace` / `--no-workspace`・`--local-cli` / `--no-local-cli`・`--run-on-pc` / `--server-windows`・`--workdir <フォルダー\|clear>`・`--read-dir <フォルダー>`・`--clear-read-dirs` |
-| PC の操作 | `--pc` / `--no-pc`・`--window <タイトル\|hwnd>`・`--standby` / `--no-standby`・`--shared-desktop` |
-| 入出力 | `--attach <ファイル>`・`--conv <会話ID>`・`--parent <ID>`・`--file <goal.txt>`・`--output <フォルダー>`・`--local-only`・`--json` |
+| 作業の場所 | `--workspace` / `--no-workspace`・`--local-cli` / `--no-local-cli`・`--run-on-pc` / `--server-windows`・`--workdir <フォルダー\|clear>`・`--read-dir <フォルダー>`・`--remove-read-dir <フォルダー>`・`--clear-read-dirs` |
+| PC の操作 | `--pc` / `--no-pc`・`--window <タイトル\|hwnd>`・`--standby` / `--no-standby`・`--shared-desktop`・`--dark-theme` / `--light-theme` |
+| 入出力・履歴 | `--attach <ファイル>`・`--attach-clipboard`・`--conv <会話ID>`・`--parent <ID>`・`--file <goal.txt>`・`--output <先>`・`--full`・`--filter <all\|active\|done>`・`--query <語>`・`--local-only` |
 
-`Qwen27.exe --api` と `qwen.cmd` も、同じコマンド名とオプションを受け付けます（`Qwen27.exe --api help` で一覧）。`qwen.cmd` / `qwen.ps1` は同じフォルダーの `Qwen27.exe` を呼びます。
+### 対話モード (`--cli`) 内の主なスラッシュコマンド
+
+- `/connect [url]`・`/open <#番号|ID>`・`/history [N|active|done|語句]`・`/continue`・`/retry`・`/copy`
+- `/attach [list|path|paste|remove|preview|clear]`・`/paste`・`/files [list|path|save <path>]`・`/upload <file>`・`/share [list|add|remove]`
+- `/plan <task>`・`/goal <task>`・`/grill-me <topic>`・`/boost <task>`・`/teamwork <task>`・`/browser <task>`
+- `/mode`・`/effort`・`/preset`・`/reset-sampling`・`/autotune`・`/tune-status`・`/tune-apply`・`/models`・`/perf`・`/theme`
+- `/workdir`・`/reset`・`/open-folder`・`/read-dir`・`/windows`・`/window`・`/pc`・`/shared-desktop`・`/standby [on|off|status]`・`/stop-pc`
+
+`Qwen27.exe --api` と `qwen.cmd` もコマンド群に対応しています（`Qwen27.exe --help` または対話内の `/help` で全一覧）。
 
 ### GUI
 

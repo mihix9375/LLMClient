@@ -431,6 +431,12 @@ pub struct CliArgs {
     pub pc_override: bool,
     pub has_local_cli_override: bool,
     pub local_cli_override: bool,
+    pub full_job: bool,
+    pub attach_clipboard: bool,
+    pub history_filter: String,
+    pub history_query: String,
+    pub remove_read_dirs: Vec<String>,
+    pub dark_theme: Option<bool>,
 }
 
 impl Default for CliArgs {
@@ -470,6 +476,12 @@ impl Default for CliArgs {
             pc_override: false,
             has_local_cli_override: false,
             local_cli_override: false,
+            full_job: false,
+            attach_clipboard: false,
+            history_filter: String::new(),
+            history_query: String::new(),
+            remove_read_dirs: Vec::new(),
+            dark_theme: None,
         }
     }
 }
@@ -700,6 +712,7 @@ pub fn parse_cli_args(args: &[String]) -> Result<CliArgs, String> {
             }
             "--shared-desktop" => out.shared_desktop = true,
             "--attach" => out.attach_files.push(need_val(raw)?),
+            "--attach-clipboard" | "--paste" => out.attach_clipboard = true,
             "--conv" | "--conversation" => out.conv_id = need_val(raw)?,
             "--parent" | "--parent-job" => out.parent_id = need_val(raw)?,
             "--file" => out.goal_file = need_val(raw)?,
@@ -707,6 +720,18 @@ pub fn parse_cli_args(args: &[String]) -> Result<CliArgs, String> {
             "--path" => out.path_arg = need_val(raw)?,
             "--ip" => out.ip = need_val(raw)?,
             "--remove" => out.remove = true,
+            "--full" => out.full_job = true,
+            "--filter" => out.history_filter = need_val(raw)?,
+            "--query" => out.history_query = need_val(raw)?,
+            "--remove-read-dir" => out.remove_read_dirs.push(need_val(raw)?),
+            "--dark-theme" => {
+                out.dark_theme = Some(true);
+                out.gui_patch.insert("darkTheme".into(), Value::Bool(true));
+            }
+            "--light-theme" => {
+                out.dark_theme = Some(false);
+                out.gui_patch.insert("darkTheme".into(), Value::Bool(false));
+            }
             "--task" => out.task = need_val(raw)?,
             "--tune-mode" => out.tune_mode = need_val(raw)?,
             "--apply" => out.apply_tune = true,
@@ -1000,6 +1025,26 @@ mod tests {
         assert_eq!(parsed.gui_patch["workMode"], "coding");
         assert_eq!(parsed.gui_patch["samplingPreset"], "balanced");
         assert_eq!(parsed.server_patch["temperature"], 0.2);
+
+        let ext = vec![
+            "Qwen27.exe".into(),
+            "--api".into(),
+            "conversations".into(),
+            "--full".into(),
+            "--attach-clipboard".into(),
+            "--filter".into(),
+            "done".into(),
+            "--query".into(),
+            "test".into(),
+            "--dark-theme".into(),
+        ];
+        let ext_parsed = parse_cli_args(&ext).unwrap();
+        assert!(ext_parsed.full_job);
+        assert!(ext_parsed.attach_clipboard);
+        assert_eq!(ext_parsed.history_filter, "done");
+        assert_eq!(ext_parsed.history_query, "test");
+        assert_eq!(ext_parsed.dark_theme, Some(true));
+        assert_eq!(ext_parsed.gui_patch["darkTheme"], Value::Bool(true));
 
         let empty = vec!["Qwen27.exe".into(), "--api".into()];
         assert!(parse_cli_args(&empty).unwrap().stdin_mode);
