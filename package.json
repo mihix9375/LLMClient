@@ -1,0 +1,10 @@
+{
+  "name": "qwen27-client",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "client": "node client.mjs"
+  }
+}
